@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+:root { --ink: #e9e4d5; --ground: #0e1617; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--ground); color: var(--ink); font-family: Arial, Helvetica, sans-serif; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+.font-serif { font-family: Georgia, "Times New Roman", serif; }
+.noise { position: fixed; inset: 0; pointer-events: none; opacity: .04; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E"); }
+.map-shell { background-image: radial-gradient(circle at 50% 20%, rgba(121,157,127,.19), transparent 38%), linear-gradient(135deg, #1d302b, #14211f 62%, #1c2b29); }
+.map-grid { background-image: linear-gradient(rgba(218,203,145,.055) 1px, transparent 1px), linear-gradient(90deg, rgba(218,203,145,.055) 1px, transparent 1px); background-size: 28px 28px; mask-image: radial-gradient(ellipse at center, black, transparent 75%); }
+.pulse-ring { animation: pulse 2.4s ease-out infinite; }
+@keyframes pulse { 0% { transform: scale(.85); opacity: .8; } 75%,100% { transform: scale(1.55); opacity: 0; } }
+.label { font-size: 10px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: #85958b; }
+.primary-button { display: inline-flex; align-items: center; gap: .5rem; border-radius: .6rem; background: #d6bd72; padding: .6rem .85rem; font-size: .8rem; font-weight: 700; color: #17201d; transition: transform .15s ease, background .15s ease; }
+.primary-button:hover { background: #ecd48d; transform: translateY(-1px); }
+.map-button { display: inline-flex; align-items: center; gap: .45rem; border-radius: .55rem; border: 1px solid rgba(255,255,255,.1); background: rgba(255,255,255,.03); padding: .45rem .65rem; color: #d5dece; font-size: .75rem; transition: background .15s ease; }
+.map-button:hover { background: rgba(213,191,120,.12); }
+@media (max-width: 640px) { .map-shell { min-height: 400px; } }
