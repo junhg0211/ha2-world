@@ -16,10 +16,30 @@ npm run dev
 
 웹훅 전송은 서버에서 수행하므로 실제 웹훅 URL은 브라우저와 소스 코드에 노출되지 않습니다. Discord 메시지의 표시 이름은 실제 계정이 아닌 현재 캐릭터 이름입니다.
 
+## 영구 상태와 Discord 명령
+
+사이트는 D1 데이터베이스에 플레이어, 캐릭터, 사건을 저장하도록 준비되어 있습니다. Discord Developer Portal에서 Interaction Endpoint URL을 다음 주소로 지정하세요.
+
+```text
+https://ha2-living-world.silvercurio2.chatgpt.site/api/discord/interactions
+```
+
+배포 환경에는 `DISCORD_PUBLIC_KEY`를 비밀값으로 설정하세요. 서명이 검증된 Discord 요청만 처리합니다.
+
+명령 등록은 로컬에서 아래 환경 변수를 설정한 후 실행합니다. 봇 토큰은 배포 환경이나 소스 코드에 저장하지 않습니다.
+
+```bash
+DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... DISCORD_GUILD_ID=... node scripts/register-discord-commands.mjs
+```
+
+- `/life`: 현재 조종 캐릭터의 체력·위치·자원을 비공개 응답으로 표시
+- `/world`: 현재 캐릭터에 관련된 최근 사건을 비공개 응답으로 표시
+
 ## 현재 범위
 
 - 캐릭터 상태·자원·지도·시설·전투 설정 대시보드
 - 웹 활동의 Discord 웹훅 중계
 - 명세에 따른 재배, 식 제작/섭취, 스탯 강화, 시설 건설, 공격 세션 시작 UI
+- D1 기반 플레이어·캐릭터·사건 모델과 서명 검증 Discord 인터랙션 엔드포인트
 
-영구 멀티플레이 상태, Discord 봇 슬래시 명령, Discord OAuth 연결은 다음 단계에서 D1 데이터베이스와 Discord 애플리케이션 자격 증명을 연결해 추가합니다.
+운영자용 캐릭터 배정 화면과 웹 행동을 D1 상태에 직접 반영하는 API는 다음 구현 단위입니다.
