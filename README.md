@@ -35,6 +35,25 @@ DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... DISCORD_GUILD_ID=... node scrip
 - `/life`: 현재 조종 캐릭터의 체력·위치·자원을 비공개 응답으로 표시
 - `/world`: 현재 캐릭터에 관련된 최근 사건을 비공개 응답으로 표시
 
+## 운영자 초기 캐릭터 배정
+
+서버 비밀값 `ADMIN_API_KEY`를 설정하면, 운영자는 `POST /api/admin/characters`로 최초 캐릭터를 특정 사이트 사용자와 Discord 사용자에게 배정할 수 있습니다. 요청에는 `x-ha2-admin-key` 헤더와 아래 형태의 JSON을 사용합니다.
+
+```json
+{
+  "name": "윤하",
+  "gender": "female",
+  "siteUserId": "사이트 사용자 ID",
+  "discordUserId": "Discord 사용자 ID",
+  "position": 128.4,
+  "raw": 18,
+  "food": 11,
+  "clothing": 8
+}
+```
+
+사이트 로그인 사용자는 `/api/me`에서 자신의 배정 상태를 확인하고, `/api/game/action`으로 이동·식 제작·섭취·재배·수확·스탯 강화·RP 발언을 실행할 수 있습니다. 모든 성공 행동은 D1 사건 기록과 Discord 웹훅으로 함께 전달됩니다.
+
 ## 현재 범위
 
 - 캐릭터 상태·자원·지도·시설·전투 설정 대시보드

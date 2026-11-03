@@ -39,3 +39,42 @@ export const worldEvents = sqliteTable("world_events", {
   visibility: text("visibility", { enum: ["private", "nearby", "public"] }).notNull().default("private"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+export const crops = sqliteTable("crops", {
+  id: text("id").primaryKey(),
+  plantedByCharacterId: text("planted_by_character_id").references(() => characters.id).notNull(),
+  position: real("position").notNull(),
+  plantedAt: integer("planted_at", { mode: "timestamp_ms" }).notNull(),
+  harvestAt: integer("harvest_at", { mode: "timestamp_ms" }).notNull(),
+  harvestedAt: integer("harvested_at", { mode: "timestamp_ms" }),
+  harvestedByCharacterId: text("harvested_by_character_id").references(() => characters.id),
+  yieldAmount: integer("yield_amount"),
+});
+
+export const facilities = sqliteTable("facilities", {
+  id: text("id").primaryKey(),
+  position: real("position").notNull().unique(),
+  hp: real("hp").notNull().default(1000),
+  hpMax: real("hp_max").notNull().default(1000),
+  joo: integer("joo").notNull().default(0),
+  completedPercent: real("completed_percent").notNull().default(0),
+  rawCommitted: integer("raw_committed").notNull().default(0),
+  passwordHash: text("password_hash"),
+  isOpen: integer("is_open", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const attacks = sqliteTable("attacks", {
+  id: text("id").primaryKey(),
+  attackerCharacterId: text("attacker_character_id").references(() => characters.id).notNull(),
+  defenderCharacterId: text("defender_character_id").references(() => characters.id),
+  facilityId: text("facility_id").references(() => facilities.id),
+  hand: text("hand", { enum: ["scissors", "rock", "paper"] }).notNull(),
+  strength: real("strength").notNull(),
+  status: text("status", { enum: ["pending", "resolved", "expired"] }).notNull().default("pending"),
+  responseHand: text("response_hand", { enum: ["scissors", "rock", "paper"] }),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  resolvedAt: integer("resolved_at", { mode: "timestamp_ms" }),
+});
