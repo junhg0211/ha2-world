@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   Axe, ChevronDown, CircleDot, Construction, Crosshair, Leaf, LockKeyhole,
   MessageCircle, Minus, MoveRight, Package, Plus, Radio, Send, Shield,
@@ -13,6 +13,11 @@ type FeedItem = {
   title: string;
   detail: string;
   time: string;
+};
+
+type StoredCharacter = {
+  name: string; gender: "male" | "female"; hp: number; hpMax: number; position: number;
+  raw: number; food: number; clothing: number; muScissors: number; muRock: number; muPaper: number;
 };
 
 const iconFor = { move: MoveRight, rp: MessageCircle, combat: Swords, world: Leaf };
@@ -35,6 +40,9 @@ export default function Home() {
   const [hand, setHand] = useState<"가위" | "바위" | "보">("가위");
   const [notice, setNotice] = useState("Discord 웹훅 연결 대기 중");
   const [sending, setSending] = useState(false);
+  const [characterName, setCharacterName] = useState("윤하");
+  const [characterGender, setCharacterGender] = useState<"male" | "female">("female");
+  const [connected, setConnected] = useState(false);
   const [feed, setFeed] = useState<FeedItem[]>([
     { id: 1, icon: "world", title: "재배가 자라고 있습니다", detail: "좌표 127.8 · 수확까지 17시간 42분", time: "방금" },
     { id: 2, icon: "move", title: "현재 조종 캐릭터를 선택했습니다", detail: "윤하 · 실제 계정 정보는 공개되지 않습니다", time: "6분 전" },
@@ -44,6 +52,20 @@ export default function Home() {
   const defense = useMemo(() => Math.round((1 - 1.02 ** -clothes) * 100), [clothes]);
   const currentMu = hand === "가위" ? mu.scissors : hand === "바위" ? mu.rock : mu.paper;
   const estimatedDamage = ((currentMu * strength) / 100) * (hp / 100);
+
+  function adoptCharacter(character: StoredCharacter) {
+    setCharacterName(character.name); setCharacterGender(character.gender);
+    setHp(Math.round(character.hp)); setPosition(character.position); setRaw(character.raw); setFood(character.food);
+    setClothes(character.clothing); setMu({ scissors: character.muScissors, rock: character.muRock, paper: character.muPaper });
+    setConnected(true);
+  }
+
+  useEffect(() => {
+    fetch("/api/me").then((response) => response.ok ? response.json() : null).then((data) => {
+      if (data?.character) { adoptCharacter(data.character); setNotice("D1 세계 상태와 동기화됨"); }
+      else if (data?.player) setNotice("조종 캐릭터 배정을 기다리고 있습니다. 운영 콘솔에서 초기 생명을 배정하세요.");
+    }).catch(() => undefined);
+  }, []);
 
   function addFeed(icon: FeedItem["icon"], title: string, detail: string) {
     setFeed((items) => [{ id: Date.now(), icon, title, detail, time: "방금" }, ...items].slice(0, 6));
@@ -63,38 +85,40 @@ export default function Home() {
   async function action(label: string, detail: string, icon: FeedItem["icon"] = "world") {
     addFeed(icon, label, detail); await publishDiscord(label, detail);
   }
+  async function persistentAction(payload: Record<string, unknown>, label: string, detail: string, icon: FeedItem["icon"] = "world") {
+    setSending(true);
+    try {
+      const response = await fetch("/api/game/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const result = await response.json() as { character?: StoredCharacter; error?: string };
+      if (!response.ok || !result.character) { setNotice(result.error ?? "행동을 처리하지 못했습니다."); return false; }
+      adoptCharacter(result.character); addFeed(icon, label, detail); setNotice("D1 상태와 Discord 웹훅에 기록되었습니다."); return true;
+    } catch { setNotice("세계 상태 서버에 연결하지 못했습니다."); return false; }
+    finally { setSending(false); }
+  }
   async function submitRp(event: FormEvent) {
     event.preventDefault(); const content = rpText.trim(); if (!content) return;
-    addFeed("rp", "윤하가 RP 메시지를 보냈습니다", content); setRpText(""); await publishDiscord("RP", content);
+    if (await persistentAction({ kind: "say", text: content }, `${characterName}가 RP 메시지를 보냈습니다`, content, "rp")) setRpText("");
   }
   async function plantRaw() {
     if (raw < 1) return setNotice("심을 재가 부족합니다.");
-    setRaw((value) => value - 1);
-    await action("재를 심었습니다", `좌표 ${position.toFixed(1)} · 24시간 뒤 재 2~4개를 수확할 수 있습니다.`);
+    await persistentAction({ kind: "plant_raw" }, "재를 심었습니다", `좌표 ${position.toFixed(1)} · 24시간 뒤 재 2~4개를 수확할 수 있습니다.`);
   }
   async function craftFood() {
     if (raw < 1) return setNotice("식 제작에는 재 1개가 필요합니다.");
-    setRaw((value) => value - 1); setFood((value) => value + 1);
-    await action("식을 제작했습니다", "재 1개를 소비해 식 1개를 만들었습니다.");
+    await persistentAction({ kind: "craft_food" }, "식을 제작했습니다", "재 1개를 소비해 식 1개를 만들었습니다.");
   }
   async function eatFood() {
     if (food < 1 || hp >= 100) return setNotice(hp >= 100 ? "체력이 가득 찼습니다." : "먹을 식이 없습니다.");
-    setFood((value) => value - 1); setHp((value) => Math.min(100, value + 1));
-    await action("식을 섭취했습니다", "체력이 1 회복되었습니다.");
+    await persistentAction({ kind: "eat_food" }, "식을 섭취했습니다", "체력이 1 회복되었습니다.");
   }
   async function raiseStat(stat: "의" | "가위" | "바위" | "보") {
     if (food < 20) return setNotice("강화에는 식 20개가 필요합니다.");
-    setFood((value) => value - 20);
-    if (stat === "의") setClothes((value) => value + 1);
-    else {
-      const key = stat === "가위" ? "scissors" : stat === "바위" ? "rock" : "paper";
-      setMu((value) => ({ ...value, [key]: value[key] + 1 }));
-    }
-    await action(`${stat} 수치를 올렸습니다`, `식 20개를 소비해 ${stat}을 1 올렸습니다.`);
+    const serverStat = stat === "의" ? "clothing" : stat === "가위" ? "scissors" : stat === "바위" ? "rock" : "paper";
+    await persistentAction({ kind: "upgrade", stat: serverStat }, `${stat} 수치를 올렸습니다`, `식 20개를 소비해 ${stat}을 1 올렸습니다.`);
   }
   async function move(delta: number) {
-    const next = Math.max(0, Math.min(360, position + delta));
-    setPosition(next); await action("이동했습니다", `윤하가 좌표 ${next.toFixed(1)}로 이동했습니다.`, "move");
+    const next = ((position + delta) % 360 + 360) % 360;
+    await persistentAction({ kind: "move", delta }, "이동했습니다", `${characterName}가 좌표 ${next.toFixed(1)}로 이동했습니다.`, "move");
   }
   async function attack() {
     await action("공격 세션을 시작했습니다", `도현에게 ${hand} 공격을 시작했습니다. 공격 강도는 비공개입니다.`, "combat");
@@ -106,14 +130,14 @@ export default function Home() {
       <div className="mx-auto flex max-w-[1500px] items-center justify-between gap-5">
         <div className="flex items-center gap-3"><div className="grid h-10 w-10 place-items-center rounded-full border border-[#b9a26d]/60 bg-[#b9a26d]/10 text-[#e1c981]"><CircleDot size={20} /></div><div><p className="font-serif text-lg leading-none tracking-[0.16em] text-[#f4edda]">LIVING RING</p><p className="mt-1 text-[10px] uppercase tracking-[0.22em] text-[#8c9a8d]">Character-first roleplay world</p></div></div>
         <div className="hidden items-center gap-2 text-xs text-[#a8b2a7] lg:flex"><Radio size={14} className="text-[#83bf9a]" /><span>세계 시간은 흐르고 있습니다</span></div>
-        <button className="flex items-center gap-2 rounded-full border border-[#c6b581]/35 bg-[#c6b581]/10 px-3 py-2 text-sm text-[#f0dfab]"><span className="grid h-6 w-6 place-items-center rounded-full bg-[#dbc481] text-[11px] font-bold text-[#26302c]">윤</span>윤하 <ChevronDown size={14} /></button>
+        <div className="flex items-center gap-2"><a href="/operator" className="hidden rounded-full border border-white/10 px-3 py-2 text-xs text-[#b9c1b5] transition hover:border-[#c6b581]/40 md:block">운영 콘솔</a><button className="flex items-center gap-2 rounded-full border border-[#c6b581]/35 bg-[#c6b581]/10 px-3 py-2 text-sm text-[#f0dfab]"><span className="grid h-6 w-6 place-items-center rounded-full bg-[#dbc481] text-[11px] font-bold text-[#26302c]">{characterName.slice(0, 1)}</span>{characterName} <ChevronDown size={14} /></button></div>
       </div>
     </header>
 
     <div className="relative z-10 mx-auto grid max-w-[1500px] gap-5 px-5 py-5 lg:grid-cols-[260px_minmax(0,1fr)_330px] lg:px-10 lg:py-8">
       <aside className="order-2 rounded-2xl border border-white/10 bg-[#152021]/75 p-4 shadow-2xl shadow-black/20 lg:order-1">
         <p className="label">현재 조종 캐릭터</p>
-        <div className="mt-3 rounded-xl border border-[#c6b581]/20 bg-gradient-to-br from-[#26322f] to-[#182524] p-4"><div className="flex items-start justify-between"><div><h1 className="font-serif text-3xl text-[#f2e9d3]">윤하</h1><p className="mt-1 text-sm text-[#a7b2a6]">여성 · 생존 38일째</p></div><span className="rounded-full bg-[#7ba788]/15 px-2 py-1 text-[10px] font-semibold text-[#9cd6ae]">ALIVE</span></div><div className="mt-5 space-y-3"><Meter label="체력" value={hp} suffix="/ 100" color="rose" /><Meter label="허기" value={hp} suffix="%" color="amber" /></div></div>
+        <div className="mt-3 rounded-xl border border-[#c6b581]/20 bg-gradient-to-br from-[#26322f] to-[#182524] p-4"><div className="flex items-start justify-between"><div><h1 className="font-serif text-3xl text-[#f2e9d3]">{characterName}</h1><p className="mt-1 text-sm text-[#a7b2a6]">{characterGender === "female" ? "여성" : "남성"} · {connected ? "D1 세계와 동기화됨" : "초기 생명 배정 대기"}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${connected ? "bg-[#7ba788]/15 text-[#9cd6ae]" : "bg-[#d8bb7a]/15 text-[#e4c983]"}`}>{connected ? "ALIVE" : "WAITING"}</span></div><div className="mt-5 space-y-3"><Meter label="체력" value={hp} suffix="/ 100" color="rose" /><Meter label="허기" value={hp} suffix="%" color="amber" /></div></div>
         <div className="mt-5"><p className="label">보유 자원</p><div className="mt-2 grid grid-cols-2 gap-2"><Resource icon={<Leaf size={17} />} label="재" value={raw} tone="green" /><Resource icon={<Wheat size={17} />} label="식" value={food} tone="gold" /><Resource icon={<Shield size={17} />} label="의" value={clothes} tone="slate" /><Resource icon={<Swords size={17} />} label="무" value={`${mu.scissors}/${mu.rock}/${mu.paper}`} tone="red" /></div></div>
         <div className="mt-5 border-t border-white/10 pt-5"><p className="label">빠른 행동</p><div className="mt-2 grid grid-cols-2 gap-2"><QuickButton icon={<Wheat size={15} />} label="식 섭취" onClick={eatFood} /><QuickButton icon={<Leaf size={15} />} label="재 심기" onClick={plantRaw} /><QuickButton icon={<Axe size={15} />} label="식 제작" onClick={craftFood} /><QuickButton icon={<Construction size={15} />} label="시설 건설" onClick={() => action("시설 건설을 준비했습니다", `좌표 ${position.toFixed(1)} · 재 100개, 유효 시간 1시간이 필요합니다.`)} /></div></div>
       </aside>
@@ -123,13 +147,13 @@ export default function Home() {
           <div className="relative flex items-start justify-between gap-3"><div><p className="label">환형 지도 · 공개 시야 6.0</p><h2 className="mt-1 font-serif text-3xl text-[#f0eadb]">갈대 평원</h2><p className="mt-2 text-sm text-[#a6b2aa]">상호작용 범위는 현재 좌표에서 좌우 0.5입니다.</p></div><div className="rounded-xl border border-white/10 bg-[#10201e]/70 px-3 py-2 text-right"><p className="text-[10px] uppercase tracking-[0.16em] text-[#8b9b92]">현재 좌표</p><p className="font-mono text-xl text-[#ebd895]">{position.toFixed(1)}</p></div></div>
           <div className="relative mt-14 h-40"><div className="absolute left-0 right-0 top-1/2 h-px bg-[#d4c385]/30" /><div className="absolute left-0 right-0 top-1/2 h-16 -translate-y-1/2 rounded-full border border-[#d4c385]/10 bg-[#0d1716]/25" />
             {facilities.map((facility, index) => <div key={facility.name} className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: `${22 + index * 27}%` }}><div className="group relative"><div className={`grid h-12 w-12 place-items-center rounded-full border ${facility.locked ? "border-[#c9b36d]/70 bg-[#c9b36d]/15 text-[#e6cf85]" : "border-[#77ad93]/70 bg-[#77ad93]/15 text-[#9fd5b4]"}`}>{facility.locked ? <LockKeyhole size={18} /> : <Package size={18} />}</div><div className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 w-36 -translate-x-1/2 rounded-lg border border-white/10 bg-[#101918]/95 p-2 text-center opacity-0 shadow-xl transition group-hover:opacity-100"><p className="text-xs font-medium text-[#eee4c8]">{facility.name}</p><p className="mt-1 text-[10px] text-[#99a69d]">체력 {facility.hp}/{facility.maxHp} · 주 {facility.joo}</p></div></div></div>)}
-            <div className="absolute left-[54%] top-1/2 -translate-x-1/2 -translate-y-1/2"><div className="pulse-ring absolute inset-0 rounded-full bg-[#e0c976]/25" /><div className="relative grid h-14 w-14 place-items-center rounded-full border-2 border-[#f1d979] bg-[#e2cc77] text-[#17211e] shadow-[0_0_28px_rgba(226,204,119,.45)]"><span className="font-serif text-xl">윤</span></div><p className="absolute left-1/2 top-full mt-2 -translate-x-1/2 whitespace-nowrap text-xs font-semibold text-[#f5e8b8]">윤하</p></div>
+            <div className="absolute left-[54%] top-1/2 -translate-x-1/2 -translate-y-1/2"><div className="pulse-ring absolute inset-0 rounded-full bg-[#e0c976]/25" /><div className="relative grid h-14 w-14 place-items-center rounded-full border-2 border-[#f1d979] bg-[#e2cc77] text-[#17211e] shadow-[0_0_28px_rgba(226,204,119,.45)]"><span className="font-serif text-xl">{characterName.slice(0, 1)}</span></div><p className="absolute left-1/2 top-full mt-2 -translate-x-1/2 whitespace-nowrap text-xs font-semibold text-[#f5e8b8]">{characterName}</p></div>
             <div className="absolute left-[39%] top-[24%] grid h-8 w-8 place-items-center rounded-full border border-[#6ea97d]/60 bg-[#6ea97d]/15 text-[#9acd9f]"><Leaf size={14} /></div>
           </div>
           <div className="relative mt-10 flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-[#0f1918]/75 p-3"><button className="map-button" onClick={() => move(-0.1)}><Minus size={16} /> 왼쪽</button><span className="text-center text-xs text-[#97a59d]">한 바퀴 1시간 · 벽은 통과를 제한하지만 시야는 막지 않습니다</span><button className="map-button" onClick={() => move(0.1)}>오른쪽 <Plus size={16} /></button></div>
         </div>
         <div className="mt-5 rounded-2xl border border-white/10 bg-[#152021]/75 p-4 md:p-5"><div className="flex gap-2 border-b border-white/10 pb-3"><Tab active={activePanel === "rp"} onClick={() => setActivePanel("rp")} icon={<MessageCircle size={15} />} label="RP 발언" /><Tab active={activePanel === "action"} onClick={() => setActivePanel("action")} icon={<Axe size={15} />} label="성장·제작" /><Tab active={activePanel === "combat"} onClick={() => setActivePanel("combat")} icon={<Crosshair size={15} />} label="공격" /></div>
-          {activePanel === "rp" && <form className="mt-4" onSubmit={submitRp}><label className="label" htmlFor="rp-message">Discord RP 채널로 보내기</label><textarea id="rp-message" value={rpText} onChange={(event) => setRpText(event.target.value)} placeholder="윤하의 목소리로 세계에 남길 말을 적어주세요." className="mt-2 min-h-28 w-full resize-none rounded-xl border border-white/10 bg-[#0c1514] p-3 text-sm text-[#f2ead7] outline-none transition placeholder:text-[#62716a] focus:border-[#c7b477]/60" /><div className="mt-3 flex items-center justify-between gap-3"><p className="text-xs text-[#89968e]">실제 Discord 계정은 노출되지 않고, <strong className="font-medium text-[#d9ca98]">윤하</strong> 이름의 웹훅으로 게시됩니다.</p><button disabled={sending} className="primary-button" type="submit"><Send size={15} /> 전송</button></div></form>}
+          {activePanel === "rp" && <form className="mt-4" onSubmit={submitRp}><label className="label" htmlFor="rp-message">Discord RP 채널로 보내기</label><textarea id="rp-message" value={rpText} onChange={(event) => setRpText(event.target.value)} placeholder={`${characterName}의 목소리로 세계에 남길 말을 적어주세요.`} className="mt-2 min-h-28 w-full resize-none rounded-xl border border-white/10 bg-[#0c1514] p-3 text-sm text-[#f2ead7] outline-none transition placeholder:text-[#62716a] focus:border-[#c7b477]/60" /><div className="mt-3 flex items-center justify-between gap-3"><p className="text-xs text-[#89968e]">실제 Discord 계정은 노출되지 않고, <strong className="font-medium text-[#d9ca98]">{characterName}</strong> 이름의 웹훅으로 게시됩니다.</p><button disabled={sending} className="primary-button" type="submit"><Send size={15} /> 전송</button></div></form>}
           {activePanel === "action" && <div className="mt-4 grid gap-3 md:grid-cols-2"><ActionCard title="의 강화" value={`Lv. ${clothes} · 피해 감소 ${defense}%`} cost="식 20" onClick={() => raiseStat("의")} /><ActionCard title="무 강화" value={`가위 ${mu.scissors} · 바위 ${mu.rock} · 보 ${mu.paper}`} cost="식 20" onClick={() => raiseStat(hand)} /><ActionCard title="주 강화" value="인근 완성 시설에서만 가능" cost="재 20" onClick={() => action("시설 주 강화 안내", "주 강화는 완성된 시설 상호작용 범위 안에서만 할 수 있습니다.")} /><ActionCard title="시설 수리" value="재 1 가치 = 체력 1" cost="재" onClick={() => action("시설 수리를 준비했습니다", "인근 시설에 재를 투입해 체력을 회복할 수 있습니다.")} /></div>}
           {activePanel === "combat" && <div className="mt-4 grid gap-4 md:grid-cols-[1fr_1.1fr]"><div className="rounded-xl border border-[#e0a99b]/20 bg-[#2a1b1b]/45 p-4"><p className="label text-[#dba89b]">공격 대상</p><div className="mt-3 flex items-center justify-between"><div><p className="font-serif text-xl text-[#f1d5cd]">도현</p><p className="text-xs text-[#b89891]">거리 0.3 · 상호작용 가능</p></div><span className="rounded-full bg-[#df8d75]/15 px-2 py-1 text-[10px] text-[#edac99]">대상에게만 공격자 공개</span></div><p className="mt-4 text-xs leading-5 text-[#b89a92]">공격 수단과 강도는 수비자가 대응을 마칠 때까지 비공개입니다.</p></div><div className="rounded-xl border border-white/10 bg-[#0d1716] p-4"><div className="flex items-center justify-between"><p className="label">공격 설정</p><span className="font-mono text-xs text-[#d6c27d]">예상 기본 피해 {estimatedDamage.toFixed(2)}</span></div><div className="mt-3 grid grid-cols-3 gap-2">{(["가위", "바위", "보"] as const).map((option) => <button key={option} onClick={() => setHand(option)} className={`rounded-lg border px-3 py-2 text-sm transition ${hand === option ? "border-[#d8be70] bg-[#d8be70]/15 text-[#f3dc96]" : "border-white/10 text-[#9eaaa2] hover:bg-white/5"}`}>{option}</button>)}</div><div className="mt-4 flex items-center gap-3"><input aria-label="공격 강도" type="range" min="0" max="100" value={strength} onChange={(event) => setStrength(Number(event.target.value))} className="accent-[#d8be70]" /><span className="w-12 font-mono text-sm text-[#ead795]">{strength}%</span><button className="primary-button ml-auto" onClick={attack}><Swords size={15} /> 공격</button></div></div></div>}
         </div>
