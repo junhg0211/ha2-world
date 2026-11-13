@@ -62,3 +62,6 @@ DISCORD_BOT_TOKEN=... DISCORD_APPLICATION_ID=... DISCORD_GUILD_ID=... node scrip
 - D1 기반 플레이어·캐릭터·사건 모델과 서명 검증 Discord 인터랙션 엔드포인트
 
 운영자용 캐릭터 배정 화면과 웹 행동을 D1 상태에 직접 반영하는 API는 다음 구현 단위입니다.
+# 세계 시간 정산
+
+`POST /api/cron/settle`는 허기, 자연사, 출산 완료를 정산하는 서버 전용 경로입니다. `CRON_SECRET`을 설정하고, 같은 비밀을 `x-ha2-cron-secret` 헤더에 담아 5분 간격으로 호출하세요. 이 경로는 사용자 계정이나 Discord 정보를 노출하지 않습니다.

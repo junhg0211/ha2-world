@@ -1,135 +1,58 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "../db";
-import { characters, crops, players, worldEvents } from "../db/schema";
+import { attacks, birthQueue, birthSessions, characters, crops, facilities, gameSettings, groundDrops, players, worldEvents } from "../db/schema";
 import { publishDiscordWebhook } from "./discord-webhook";
 
 export type DiscordCharacter = typeof characters.$inferSelect;
-
+type Hand = "scissors" | "rock" | "paper";
 export type GameAction =
-  | { kind: "move"; delta: number }
-  | { kind: "craft_food" }
-  | { kind: "eat_food" }
-  | { kind: "plant_raw" }
-  | { kind: "harvest"; cropId: string }
-  | { kind: "upgrade"; stat: "clothing" | "scissors" | "rock" | "paper" }
-  | { kind: "say"; text: string };
+  | { kind: "move"; delta: number } | { kind: "craft_food" } | { kind: "eat_food" } | { kind: "plant_raw" } | { kind: "harvest"; cropId: string } | { kind: "collect_drop"; dropId: string }
+  | { kind: "upgrade"; stat: "clothing" | Hand } | { kind: "say"; text: string } | { kind: "attack_character"; targetId: string; hand: Hand; strength: number } | { kind: "defend"; attackId: string; hand: Hand }
+  | { kind: "attack_facility"; facilityId: string; hand: Hand; strength: number } | { kind: "build_facility"; position: number; password?: string } | { kind: "repair_facility"; facilityId: string; raw: number } | { kind: "upgrade_joo"; facilityId: string }
+  | { kind: "facility_access"; facilityId: string; password?: string; passes?: number; seconds?: number } | { kind: "facility_password"; facilityId: string; password: string; nextPassword?: string } | { kind: "facility_store"; facilityId: string; raw: number; food: number } | { kind: "facility_take"; facilityId: string; raw: number; food: number }
+  | { kind: "birth_start"; partnerId: string; name: string; controllerPlayerId?: string } | { kind: "birth_approve"; sessionId: string } | { kind: "queue"; join: boolean } | { kind: "switch_character"; characterId: string };
 
-const now = () => new Date();
-const id = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+const HOUR = 3_600_000, DAY = 24 * HOUR, id = (p: string) => `${p}_${crypto.randomUUID()}`, now = () => new Date();
+const defaults: Record<string, number> = { maxCharacters: 3, hpMax: 100, naturalLifeDays: 100, hungerHours: 72, attackWindowHours: 24, attackCooldownMinutes: 10, interactionDistance: .5, visibilityDistance: 6, facilityBuildRaw: 100, facilityHp: 1000, foodUpgradeCost: 20, jooRawCost: 20 };
+const normalize = (n: number) => ((n % 360) + 360) % 360;
+export const ringDistance = (a: number, b: number) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+const armor = (level: number) => 1.02 ** -Math.max(0, level);
+const field = (hand: Hand): "muScissors" | "muRock" | "muPaper" => hand === "scissors" ? "muScissors" : hand === "rock" ? "muRock" : "muPaper";
+const rps = (a: Hand, d: Hand) => a === d ? .2 : (a === "scissors" && d === "paper") || (a === "rock" && d === "scissors") || (a === "paper" && d === "rock") ? 0 : 1;
+async function setting(key: string) { const [row] = await getDb().select().from(gameSettings).where(eq(gameSettings.key, key)).limit(1); return row ? Number(row.value) : defaults[key]; }
+async function hash(value: string) { const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return Array.from(new Uint8Array(d)).map((n) => n.toString(16).padStart(2, "0")).join(""); }
+async function event(c: DiscordCharacter, type: string, detail: string, visibility: "private" | "nearby" | "public" = "private") { await getDb().insert(worldEvents).values({ id: id("event"), characterId: c.id, type, detail, visibility, createdAt: now() }); return publishDiscordWebhook({ characterName: c.name, event: type, detail }); }
 
-export async function ensureSitePlayer(siteUserId: string, displayName: string) {
-  const db = getDb();
-  const [existing] = await db.select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1);
-  if (existing) return existing;
-  const player = { id: id("player"), siteUserId, discordUserId: null, displayName, activeCharacterId: null, isAdmin: false, createdAt: now() };
-  await db.insert(players).values(player);
-  return player;
-}
+export async function ensureSitePlayer(siteUserId: string, displayName: string) { const db = getDb(), [found] = await db.select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1); if (found) return found; const player = { id: id("player"), siteUserId, discordUserId: null, displayName, activeCharacterId: null, isAdmin: false, createdAt: now() }; await db.insert(players).values(player); return player; }
+export async function activeCharacterForSiteUser(siteUserId: string) { const [p] = await getDb().select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1); if (!p?.activeCharacterId) return null; const [c] = await getDb().select().from(characters).where(and(eq(characters.id, p.activeCharacterId), eq(characters.alive, true))).limit(1); return c ?? null; }
+export async function activeCharacterForDiscord(discordUserId: string) { const [p] = await getDb().select().from(players).where(eq(players.discordUserId, discordUserId)).limit(1); if (!p?.activeCharacterId) return null; const [c] = await getDb().select().from(characters).where(and(eq(characters.id, p.activeCharacterId), eq(characters.alive, true))).limit(1); return c ?? null; }
 
-export async function activeCharacterForSiteUser(siteUserId: string) {
-  const db = getDb();
-  const [player] = await db.select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1);
-  if (!player?.activeCharacterId) return null;
-  const [character] = await db.select().from(characters).where(and(eq(characters.id, player.activeCharacterId), eq(characters.alive, true))).limit(1);
-  return character ?? null;
-}
+async function kill(c: DiscordCharacter, reason: string) { const db = getDb(), t = now(); if (c.raw || c.food) await db.insert(groundDrops).values({ id: id("drop"), position: c.position, raw: c.raw, food: c.food, source: "death", createdAt: t }); await db.batch([db.update(characters).set({ alive: false, hp: 0, raw: 0, food: 0, updatedAt: t }).where(eq(characters.id, c.id)), db.update(players).set({ activeCharacterId: null }).where(eq(players.activeCharacterId, c.id)), db.insert(worldEvents).values({ id: id("event"), characterId: c.id, type: "사망", detail: reason, visibility: "nearby", createdAt: t })]); await publishDiscordWebhook({ characterName: c.name, event: "사망", detail: "주변의 생명만 이 사실을 알 수 있습니다." }); }
+export async function settleWorld() { const db = getDb(), t = now(), living = await db.select().from(characters).where(eq(characters.alive, true)), hungerHours = await setting("hungerHours"); for (const c of living) { if (c.naturalDeathAt <= t) { await kill(c, "생명의 수명이 다했습니다."); continue; } const damage = Math.max(0, t.getTime() - c.hungerAt.getTime()) / (hungerHours * HOUR) * c.hpMax; if (damage < .001) continue; let hp = Math.max(0, c.hp - damage), food = c.food; if (hp < 10 && food) { const meals = Math.min(food, Math.ceil(10 - hp)); food -= meals; hp = Math.min(c.hpMax, hp + meals); } const changed = { hp, food, hungerAt: t, updatedAt: t }; if (!hp) await kill({ ...c, ...changed }); else await db.update(characters).set(changed).where(eq(characters.id, c.id)); } const sessions = await db.select().from(birthSessions).where(eq(birthSessions.status, "gestating")); for (const s of sessions) if (s.completesAt && s.completesAt <= t) await completeBirth(s); }
+async function completeBirth(s: typeof birthSessions.$inferSelect) { const db = getDb(), t = now(), [mother] = await db.select().from(characters).where(eq(characters.id, s.motherId)).limit(1); if (!mother?.alive || !s.proposedName) { await db.update(birthSessions).set({ status: "cancelled" }).where(eq(birthSessions.id, s.id)); return; } const cap = await setting("maxCharacters"); let controller = s.controllerPlayerId ? (await db.select().from(players).where(eq(players.id, s.controllerPlayerId)).limit(1))[0] : undefined; const eligible = async (p: typeof players.$inferSelect | undefined) => !!p && (await db.select().from(characters).where(and(eq(characters.playerId, p.id), eq(characters.alive, true)))).length < cap; if (!(await eligible(controller))) for (const queued of await db.select().from(birthQueue).orderBy(birthQueue.joinedAt)) { const p = (await db.select().from(players).where(eq(players.id, queued.playerId)).limit(1))[0]; if (await eligible(p)) { controller = p; await db.delete(birthQueue).where(eq(birthQueue.playerId, p.id)); break; } } const life = await setting("naturalLifeDays"), hpMax = await setting("hpMax"), child = { id: id("character"), playerId: controller?.id ?? null, name: s.proposedName, gender: Math.random() < .5 ? "female" as const : "male" as const, alive: true, bornAt: t, naturalDeathAt: new Date(t.getTime() + life * DAY), position: mother.position, hp: hpMax, hpMax, hungerAt: t, raw: 0, food: 0, clothing: 0, muScissors: 1, muRock: 1, muPaper: 1, createdAt: t, updatedAt: t }; await db.batch([db.insert(characters).values(child), db.update(birthSessions).set({ status: "completed" }).where(eq(birthSessions.id, s.id)), ...(controller ? [db.update(players).set({ activeCharacterId: child.id }).where(eq(players.id, controller.id))] : [])]); await event(child, "출생", `${child.name}이(가) 어머니의 위치에서 태어났습니다.`, "nearby"); }
+async function active(siteUserId: string) { await settleWorld(); const c = await activeCharacterForSiteUser(siteUserId); if (!c) throw new Error("현재 조종 캐릭터가 없습니다."); return c; }
+async function assertFree(c: DiscordCharacter) { const rows = await getDb().select().from(attacks).where(and(eq(attacks.defenderCharacterId, c.id), eq(attacks.status, "pending"))); if (rows.some((a) => a.expiresAt > now())) throw new Error("피격 대응 대기 중에는 먼저 방어해야 합니다."); }
+async function nearby(a: number, b: number) { if (ringDistance(a, b) > await setting("interactionDistance")) throw new Error("상호작용 범위 안에 있지 않습니다."); }
+async function cooldown(c: DiscordCharacter) { const m = await setting("attackCooldownMinutes"), rows = await getDb().select().from(attacks).where(eq(attacks.attackerCharacterId, c.id)); if (rows.some((x) => x.createdAt.getTime() + m * 60_000 > Date.now())) throw new Error("공격 쿨다운 중입니다."); }
 
-async function writeEvent(character: DiscordCharacter, type: string, detail: string, visibility: "private" | "nearby" | "public" = "private") {
-  const db = getDb();
-  await db.insert(worldEvents).values({ id: id("event"), characterId: character.id, type, detail, visibility, createdAt: now() });
-  return publishDiscordWebhook({ characterName: character.name, event: type, detail });
-}
+export async function performAction(siteUserId: string, action: GameAction) { const db = getDb(), c = await active(siteUserId), t = now(); if (action.kind === "switch_character") { const [p] = await db.select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1), [selected] = await db.select().from(characters).where(and(eq(characters.id, action.characterId), eq(characters.playerId, p.id), eq(characters.alive, true))).limit(1); if (!selected) throw new Error("선택할 수 없는 생명입니다."); await db.update(players).set({ activeCharacterId: selected.id }).where(eq(players.id, p.id)); return selected; }
+ if (action.kind === "queue") { const [p] = await db.select().from(players).where(eq(players.siteUserId, siteUserId)).limit(1); if (action.join) await db.insert(birthQueue).values({ playerId: p.id, joinedAt: t }).onConflictDoNothing(); else await db.delete(birthQueue).where(eq(birthQueue.playerId, p.id)); return c; }
+ if (action.kind === "defend") return defend(c, action.attackId, action.hand); if (action.kind === "eat_food") { if (!c.food || c.hp >= c.hpMax) throw new Error("식을 먹을 수 없습니다."); const next = { food: c.food - 1, hp: Math.min(c.hpMax, c.hp + 1), updatedAt: t }; await db.update(characters).set(next).where(eq(characters.id, c.id)); return { ...c, ...next }; } await assertFree(c);
+ if (action.kind === "move") { if (!Number.isFinite(action.delta) || Math.abs(action.delta) > 6) throw new Error("한 번에 이동할 수 있는 거리는 6.0 이하입니다."); const position = normalize(c.position + action.delta); await db.update(characters).set({ position, updatedAt: t }).where(eq(characters.id, c.id)); await event(c, "이동", `좌표 ${position.toFixed(1)}로 이동했습니다.`, "nearby"); return { ...c, position }; }
+ if (action.kind === "craft_food") { if (!c.raw) throw new Error("식 제작에는 재 1개가 필요합니다."); const next = { raw: c.raw - 1, food: c.food + 1, updatedAt: t }; await db.update(characters).set(next).where(eq(characters.id, c.id)); return { ...c, ...next }; }
+ if (action.kind === "plant_raw") { if (!c.raw) throw new Error("심을 재가 없습니다."); await db.batch([db.update(characters).set({ raw: c.raw - 1, updatedAt: t }).where(eq(characters.id, c.id)), db.insert(crops).values({ id: id("crop"), plantedByCharacterId: c.id, position: c.position, plantedAt: t, harvestAt: new Date(t.getTime() + DAY), harvestedAt: null, harvestedByCharacterId: null, yieldAmount: null })]); return { ...c, raw: c.raw - 1 }; }
+ if (action.kind === "harvest") { const [crop] = await db.select().from(crops).where(eq(crops.id, action.cropId)).limit(1); if (!crop || crop.harvestedAt || crop.harvestAt > t) throw new Error("수확할 수 있는 재배가 없습니다."); await nearby(c.position, crop.position); const gained = 2 + Math.floor(Math.random() * 3); await db.batch([db.update(crops).set({ harvestedAt: t, harvestedByCharacterId: c.id, yieldAmount: gained }).where(eq(crops.id, crop.id)), db.update(characters).set({ raw: c.raw + gained, updatedAt: t }).where(eq(characters.id, c.id))]); return { ...c, raw: c.raw + gained }; }
+ if (action.kind === "collect_drop") { const [drop] = await db.select().from(groundDrops).where(eq(groundDrops.id, action.dropId)).limit(1); if (!drop) throw new Error("주울 물건이 없습니다."); await nearby(c.position, drop.position); const next = { raw: c.raw + drop.raw, food: c.food + drop.food, updatedAt: t }; await db.batch([db.update(characters).set(next).where(eq(characters.id, c.id)), db.delete(groundDrops).where(eq(groundDrops.id, drop.id))]); return { ...c, ...next }; }
+ if (action.kind === "upgrade") { const cost = await setting("foodUpgradeCost"); if (c.food < cost) throw new Error(`강화에는 식 ${cost}개가 필요합니다.`); const stat = action.stat === "clothing" ? "clothing" : field(action.stat), next = { food: c.food - cost, [stat]: c[stat] + 1, updatedAt: t }; await db.update(characters).set(next).where(eq(characters.id, c.id)); return { ...c, ...next }; }
+ if (action.kind === "say") { const text = action.text.trim().slice(0, 1800); if (!text) throw new Error("보낼 RP 메시지가 없습니다."); await event(c, "RP", text, "public"); return c; }
+ if (action.kind === "attack_character") return characterAttack(c, action); if (action.kind === "attack_facility") return facilityAttack(c, action); if (action.kind === "build_facility") return build(c, action); if (action.kind === "repair_facility" || action.kind === "upgrade_joo" || action.kind === "facility_access" || action.kind === "facility_password" || action.kind === "facility_store" || action.kind === "facility_take") return facility(c, action); if (action.kind === "birth_start" || action.kind === "birth_approve") return birth(c, action); throw new Error("알 수 없는 행동입니다."); }
 
-function normalizedPosition(position: number) {
-  return ((position % 360) + 360) % 360;
-}
-
-export async function performAction(siteUserId: string, action: GameAction) {
-  const db = getDb();
-  const character = await activeCharacterForSiteUser(siteUserId);
-  if (!character) throw new Error("현재 조종 캐릭터가 없습니다.");
-  const updatedAt = now();
-
-  if (action.kind === "move") {
-    if (!Number.isFinite(action.delta) || Math.abs(action.delta) > 6) throw new Error("한 번에 이동할 수 있는 거리는 6.0 이하입니다.");
-    const position = normalizedPosition(character.position + action.delta);
-    await db.update(characters).set({ position, updatedAt }).where(eq(characters.id, character.id));
-    await writeEvent(character, "이동", `좌표 ${position.toFixed(1)}로 이동했습니다.`, "nearby");
-    return { ...character, position };
-  }
-
-  if (action.kind === "craft_food") {
-    if (character.raw < 1) throw new Error("식 제작에는 재 1개가 필요합니다.");
-    const changes = { raw: character.raw - 1, food: character.food + 1, updatedAt };
-    await db.update(characters).set(changes).where(eq(characters.id, character.id));
-    await writeEvent(character, "식 제작", "재 1개를 소비해 식 1개를 만들었습니다.");
-    return { ...character, ...changes };
-  }
-
-  if (action.kind === "eat_food") {
-    if (character.food < 1) throw new Error("먹을 식이 없습니다.");
-    if (character.hp >= character.hpMax) throw new Error("체력이 이미 가득 찼습니다.");
-    const changes = { food: character.food - 1, hp: Math.min(character.hpMax, character.hp + 1), updatedAt };
-    await db.update(characters).set(changes).where(eq(characters.id, character.id));
-    await writeEvent(character, "식 섭취", "체력이 1 회복되었습니다.");
-    return { ...character, ...changes };
-  }
-
-  if (action.kind === "plant_raw") {
-    if (character.raw < 1) throw new Error("심을 재가 없습니다.");
-    const plantedAt = now();
-    await db.batch([
-      db.update(characters).set({ raw: character.raw - 1, updatedAt }).where(eq(characters.id, character.id)),
-      db.insert(crops).values({ id: id("crop"), plantedByCharacterId: character.id, position: character.position, plantedAt, harvestAt: new Date(plantedAt.getTime() + 24 * 60 * 60 * 1000), harvestedAt: null, harvestedByCharacterId: null, yieldAmount: null }),
-    ]);
-    await writeEvent(character, "재배", `좌표 ${character.position.toFixed(1)}에 재를 심었습니다. 24시간 뒤 누구나 수확할 수 있습니다.`, "nearby");
-    return { ...character, raw: character.raw - 1, updatedAt };
-  }
-
-  if (action.kind === "harvest") {
-    const [crop] = await db.select().from(crops).where(eq(crops.id, action.cropId)).limit(1);
-    if (!crop || crop.harvestedAt) throw new Error("수확할 수 있는 재배가 없습니다.");
-    if (crop.harvestAt.getTime() > Date.now()) throw new Error("아직 수확할 수 없습니다.");
-    const yieldAmount = 2 + Math.floor(Math.random() * 3);
-    await db.batch([
-      db.update(crops).set({ harvestedAt: updatedAt, harvestedByCharacterId: character.id, yieldAmount }).where(eq(crops.id, crop.id)),
-      db.update(characters).set({ raw: character.raw + yieldAmount, updatedAt }).where(eq(characters.id, character.id)),
-    ]);
-    await writeEvent(character, "수확", `재배한 재를 수확해 재 ${yieldAmount}개를 얻었습니다.`, "nearby");
-    return { ...character, raw: character.raw + yieldAmount, updatedAt };
-  }
-
-  if (action.kind === "upgrade") {
-    if (character.food < 20) throw new Error("스탯 강화에는 식 20개가 필요합니다.");
-    const field = action.stat === "clothing" ? "clothing" : action.stat === "scissors" ? "muScissors" : action.stat === "rock" ? "muRock" : "muPaper";
-    const changes = { food: character.food - 20, [field]: character[field] + 1, updatedAt };
-    await db.update(characters).set(changes).where(eq(characters.id, character.id));
-    await writeEvent(character, "스탯 강화", `식 20개를 소비해 ${action.stat} 수치를 1 올렸습니다.`);
-    return { ...character, ...changes };
-  }
-
-  const text = action.text.trim().slice(0, 1800);
-  if (!text) throw new Error("보낼 RP 메시지가 없습니다.");
-  await writeEvent(character, "RP", text, "public");
-  return character;
-}
-
-export async function activeCharacterForDiscord(discordUserId: string) {
-  const db = getDb();
-  const [player] = await db.select().from(players).where(eq(players.discordUserId, discordUserId)).limit(1);
-  if (!player?.activeCharacterId) return null;
-  const [character] = await db.select().from(characters).where(and(eq(characters.id, player.activeCharacterId), eq(characters.alive, true))).limit(1);
-  return character ?? null;
-}
-
-export async function recentEventsForCharacter(characterId: string) {
-  return getDb().select().from(worldEvents).where(eq(worldEvents.characterId, characterId)).orderBy(desc(worldEvents.createdAt)).limit(5);
-}
-
-export function characterSummary(character: DiscordCharacter) {
-  return [
-    `**${character.name}** · ${character.gender === "female" ? "여성" : "남성"}`,
-    `체력 ${Math.round(character.hp)}/${Math.round(character.hpMax)} · 좌표 ${character.position.toFixed(1)}`,
-    `재 ${character.raw} · 식 ${character.food} · 의 ${character.clothing} · 무 ${character.muScissors}/${character.muRock}/${character.muPaper}`,
-  ].join("\n");
-}
+async function characterAttack(c: DiscordCharacter, a: Extract<GameAction, { kind: "attack_character" }>) { const db = getDb(); if (!Number.isFinite(a.strength) || a.strength < 0 || a.strength > 100) throw new Error("공격 강도는 0~100%여야 합니다."); const [target] = await db.select().from(characters).where(and(eq(characters.id, a.targetId), eq(characters.alive, true))).limit(1); if (!target || target.id === c.id) throw new Error("공격 대상을 찾을 수 없습니다."); await nearby(c.position, target.position); await cooldown(c); await db.insert(attacks).values({ id: id("attack"), attackerCharacterId: c.id, defenderCharacterId: target.id, facilityId: null, hand: a.hand, strength: a.strength / 100, status: "pending", responseHand: null, expiresAt: new Date(Date.now() + await setting("attackWindowHours") * HOUR), createdAt: now(), resolvedAt: null }); await event(c, "공격", `${target.name}에게 공격을 시작했습니다.`, "private"); return c; }
+async function defend(c: DiscordCharacter, attackId: string, hand: Hand) { const db = getDb(), [a] = await db.select().from(attacks).where(and(eq(attacks.id, attackId), eq(attacks.defenderCharacterId, c.id), eq(attacks.status, "pending"))).limit(1); if (!a) throw new Error("대응할 공격이 없습니다."); const [attacker] = await db.select().from(characters).where(eq(characters.id, a.attackerCharacterId)).limit(1); if (!attacker) throw new Error("공격 기록이 유효하지 않습니다."); const mult = a.expiresAt <= now() ? 1 : rps(a.hand as Hand, hand), damage = attacker[field(a.hand as Hand)] * a.strength * attacker.hp / attacker.hpMax * mult * armor(c[field(hand)]) * armor(c.clothing), hp = Math.max(0, c.hp - damage), t = now(); await db.update(attacks).set({ status: a.expiresAt <= t ? "expired" : "resolved", responseHand: hand, resolvedAt: t }).where(eq(attacks.id, a.id)); if (!hp) await kill({ ...c, hp, updatedAt: t }, "전투에서 체력이 0이 되었습니다."); else await db.update(characters).set({ hp, updatedAt: t }).where(eq(characters.id, c.id)); return { ...c, hp }; }
+async function facilityAttack(c: DiscordCharacter, a: Extract<GameAction, { kind: "attack_facility" }>) { const db = getDb(), [f] = await db.select().from(facilities).where(eq(facilities.id, a.facilityId)).limit(1); if (!f) throw new Error("시설을 찾을 수 없습니다."); await nearby(c.position, f.position); await cooldown(c); const d = (["scissors", "rock", "paper"] as Hand[])[Math.floor(Math.random() * 3)], damage = c[field(a.hand)] * Math.max(0, Math.min(100, a.strength)) / 100 * c.hp / c.hpMax * rps(a.hand, d) * armor(f.joo), hp = Math.max(0, f.hp - damage), t = now(); if (!hp) { if (f.rawStored || f.foodStored) await db.insert(groundDrops).values({ id: id("drop"), position: f.position, raw: f.rawStored, food: f.foodStored, source: "facility", createdAt: t }); await db.delete(facilities).where(eq(facilities.id, f.id)); } else await db.update(facilities).set({ hp, updatedAt: t }).where(eq(facilities.id, f.id)); await db.insert(attacks).values({ id: id("attack"), attackerCharacterId: c.id, defenderCharacterId: null, facilityId: f.id, hand: a.hand, strength: a.strength / 100, status: "resolved", responseHand: d, expiresAt: t, createdAt: t, resolvedAt: t }); return c; }
+async function build(c: DiscordCharacter, a: Extract<GameAction, { kind: "build_facility" }>) { const db = getDb(), position = normalize(a.position), t = now(); await nearby(c.position, position); let [f] = await db.select().from(facilities).where(eq(facilities.position, position)).limit(1); if (!f) { f = { id: id("facility"), position, hp: 0, hpMax: await setting("facilityHp"), joo: 0, completedPercent: 0, rawCommitted: 0, builderCharacterId: c.id, constructionLastAt: t, passwordHash: a.password ? await hash(a.password) : null, isOpen: false, openUntil: null, passesRemaining: 0, rawStored: 0, foodStored: 0, createdAt: t, updatedAt: t }; await db.insert(facilities).values(f); return c; } if (f.completedPercent >= 1) throw new Error("이미 완성된 시설입니다."); if (f.builderCharacterId && f.builderCharacterId !== c.id) throw new Error("다른 생명이 이 좌표의 시설을 건설 중입니다."); const cost = await setting("facilityBuildRaw"), elapsed = f.constructionLastAt ? Math.floor((t.getTime() - f.constructionLastAt.getTime()) / 36_000) : 0, spent = Math.min(c.raw, Math.max(0, cost - f.rawCommitted), elapsed); if (!spent) { await db.update(facilities).set({ builderCharacterId: c.id, constructionLastAt: t, updatedAt: t }).where(eq(facilities.id, f.id)); return c; } const rawCommitted = f.rawCommitted + spent, pct = rawCommitted / cost, hp = await setting("facilityHp") * pct; await db.batch([db.update(characters).set({ raw: c.raw - spent, updatedAt: t }).where(eq(characters.id, c.id)), db.update(facilities).set({ rawCommitted, completedPercent: pct, hp, builderCharacterId: c.id, constructionLastAt: t, updatedAt: t }).where(eq(facilities.id, f.id))]); return { ...c, raw: c.raw - spent }; }
+async function facility(c: DiscordCharacter, a: Extract<GameAction, { kind: "repair_facility" | "upgrade_joo" | "facility_access" | "facility_store" | "facility_take" }>) { const db = getDb(), [f] = await db.select().from(facilities).where(eq(facilities.id, a.facilityId)).limit(1); if (!f) throw new Error("시설을 찾을 수 없습니다."); await nearby(c.position, f.position); if (a.kind === "facility_access") { if (f.passwordHash && (!a.password || await hash(a.password) !== f.passwordHash)) throw new Error("시설 비밀번호가 올바르지 않습니다."); await db.update(facilities).set({ isOpen: true, openUntil: new Date(Date.now() + Math.max(1, Math.min(3600, a.seconds ?? 10)) * 1000), passesRemaining: Math.max(1, Math.floor(a.passes ?? 1)), updatedAt: now() }).where(eq(facilities.id, f.id)); return c; } if (a.kind === "repair_facility") { const n = Math.max(0, Math.min(Math.floor(a.raw), c.raw, Math.ceil(f.hpMax - f.hp))); if (!n) throw new Error("수리할 재가 없습니다."); await db.batch([db.update(characters).set({ raw: c.raw - n, updatedAt: now() }).where(eq(characters.id, c.id)), db.update(facilities).set({ hp: f.hp + n, updatedAt: now() }).where(eq(facilities.id, f.id))]); return { ...c, raw: c.raw - n }; } if (a.kind === "upgrade_joo") { if (f.completedPercent < 1) throw new Error("미완성 시설은 주를 강화할 수 없습니다."); const n = await setting("jooRawCost"); if (c.raw < n) throw new Error(`주 강화에는 재 ${n}개가 필요합니다.`); await db.batch([db.update(characters).set({ raw: c.raw - n, updatedAt: now() }).where(eq(characters.id, c.id)), db.update(facilities).set({ joo: f.joo + 1, updatedAt: now() }).where(eq(facilities.id, f.id))]); return { ...c, raw: c.raw - n }; } if (f.passwordHash) throw new Error("비밀번호를 입력해 시설을 연 뒤 관리해야 합니다."); const raw = Math.max(0, Math.floor(a.raw)), food = Math.max(0, Math.floor(a.food)); if (a.kind === "facility_store") { if (raw > c.raw || food > c.food) throw new Error("보관할 자원이 부족합니다."); await db.batch([db.update(characters).set({ raw: c.raw - raw, food: c.food - food, updatedAt: now() }).where(eq(characters.id, c.id)), db.update(facilities).set({ rawStored: f.rawStored + raw, foodStored: f.foodStored + food, updatedAt: now() }).where(eq(facilities.id, f.id))]); return { ...c, raw: c.raw - raw, food: c.food - food }; } if (raw > f.rawStored || food > f.foodStored) throw new Error("보관함 자원이 부족합니다."); await db.batch([db.update(characters).set({ raw: c.raw + raw, food: c.food + food, updatedAt: now() }).where(eq(characters.id, c.id)), db.update(facilities).set({ rawStored: f.rawStored - raw, foodStored: f.foodStored - food, updatedAt: now() }).where(eq(facilities.id, f.id))]); return { ...c, raw: c.raw + raw, food: c.food + food }; }
+async function birth(c: DiscordCharacter, a: Extract<GameAction, { kind: "birth_start" | "birth_approve" }>) { const db = getDb(); if (a.kind === "birth_start") { const [partner] = await db.select().from(characters).where(and(eq(characters.id, a.partnerId), eq(characters.alive, true))).limit(1); if (!partner || partner.gender === c.gender) throw new Error("서로 다른 성별의 생명만 출산할 수 있습니다."); await nearby(c.position, partner.position); const mother = c.gender === "female" ? c : partner, father = c.gender === "male" ? c : partner; await db.insert(birthSessions).values({ id: id("birth"), motherId: mother.id, fatherId: father.id, proposedName: a.name.trim().slice(0, 40), controllerPlayerId: a.controllerPlayerId ?? null, motherApproved: c.id === mother.id, fatherApproved: c.id === father.id, status: "pending", completesAt: null, createdAt: now() }); return c; } const [s] = await db.select().from(birthSessions).where(eq(birthSessions.id, a.sessionId)).limit(1); if (!s || s.status !== "pending" || (s.motherId !== c.id && s.fatherId !== c.id)) throw new Error("승인할 출산 세션이 없습니다."); const motherApproved = s.motherApproved || s.motherId === c.id, fatherApproved = s.fatherApproved || s.fatherId === c.id; await db.update(birthSessions).set(motherApproved && fatherApproved ? { motherApproved, fatherApproved, status: "gestating", completesAt: new Date(Date.now() + DAY) } : { motherApproved, fatherApproved }).where(eq(birthSessions.id, s.id)); return c; }
+export async function worldStateFor(c: DiscordCharacter) { await settleWorld(); const db = getDb(), range = await setting("visibilityDistance"), filter = <T extends { position: number }>(items: T[]) => items.filter((x) => ringDistance(c.position, x.position) <= range), nearbyCharacters = filter((await db.select().from(characters).where(eq(characters.alive, true))).filter((x) => x.id !== c.id)).map(({ playerId, ...visible }) => visible), pending = await db.select().from(attacks).where(and(eq(attacks.defenderCharacterId, c.id), eq(attacks.status, "pending"))), births = (await db.select().from(birthSessions).where(eq(birthSessions.status, "pending"))).filter((x) => x.motherId === c.id || x.fatherId === c.id); return { facilities: filter(await db.select().from(facilities)), drops: filter(await db.select().from(groundDrops)), crops: filter(await db.select().from(crops)), characters: nearbyCharacters, birthSessions: births, pendingAttacks: pending.map(({ hand, strength, ...safe }) => safe), settings: { interactionDistance: await setting("interactionDistance"), visibilityDistance: range } }; }
+export async function recentEventsForCharacter(characterId: string) { return getDb().select().from(worldEvents).where(eq(worldEvents.characterId, characterId)).orderBy(desc(worldEvents.createdAt)).limit(10); }
+export function characterSummary(c: DiscordCharacter) { return [`**${c.name}** · ${c.gender === "female" ? "여성" : "남성"}`, `체력 ${Math.round(c.hp)}/${Math.round(c.hpMax)} · 좌표 ${c.position.toFixed(1)}`, `재 ${c.raw} · 식 ${c.food} · 의 ${c.clothing} · 무 ${c.muScissors}/${c.muRock}/${c.muPaper}`].join("\n"); }

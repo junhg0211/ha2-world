@@ -1,5 +1,5 @@
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { activeCharacterForSiteUser, ensureSitePlayer, recentEventsForCharacter } from "../../../lib/game-server";
+import { activeCharacterForSiteUser, ensureSitePlayer, recentEventsForCharacter, worldStateFor } from "../../../lib/game-server";
 
 export async function GET() {
   const user = await getChatGPTUser();
@@ -7,5 +7,6 @@ export async function GET() {
   const player = await ensureSitePlayer(user.userId, user.displayName);
   const character = await activeCharacterForSiteUser(user.userId);
   const events = character ? await recentEventsForCharacter(character.id) : [];
-  return Response.json({ player, character, events });
+  const world = character ? await worldStateFor(character) : null;
+  return Response.json({ player, character, events, world });
 }

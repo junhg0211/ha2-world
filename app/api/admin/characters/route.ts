@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     id: id("character"), playerId: player.id, name, gender, alive: true,
     bornAt: now, naturalDeathAt: new Date(now.getTime() + 100 * 24 * 60 * 60 * 1000),
     position: typeof body?.position === "number" ? body.position : 0,
-    hp: 100, hpMax: 100,
+    hp: 100, hpMax: 100, hungerAt: now,
     raw: typeof body?.raw === "number" ? Math.max(0, Math.floor(body.raw)) : 0,
     food: typeof body?.food === "number" ? Math.max(0, Math.floor(body.food)) : 0,
     clothing: typeof body?.clothing === "number" ? Math.max(0, Math.floor(body.clothing)) : 0,
